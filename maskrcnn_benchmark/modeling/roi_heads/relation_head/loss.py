@@ -11,37 +11,6 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.modeling.utils import cat
 
-class MultiFocalLoss(nn.Module):
-    """Multi-class Focal Loss for hard example mining in relation classification.
-    
-    Focal Loss reduces the contribution of easy examples and focuses training
-    on hard, misclassified examples. This is particularly beneficial for SGG
-    where head predicates (e.g., 'on', 'has') dominate and are easily classified.
-    
-    Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
-    """
-    def __init__(self, gamma=2.0, reduction='mean'):
-        super(MultiFocalLoss, self).__init__()
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, input, target):
-        log_probs = F.log_softmax(input, dim=1)
-        probs = log_probs.exp()
-        # gather the log-probability of the ground-truth class
-        target = target.long()
-        log_pt = log_probs.gather(1, target.unsqueeze(1)).squeeze(1)
-        pt = log_pt.exp()
-        # focal weight: (1 - p_t)^gamma
-        focal_weight = (1.0 - pt) ** self.gamma
-        loss = -focal_weight * log_pt
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
-
-
 class RelationLossComputation(object):
     """
     Computes the loss for relation triplet.
@@ -74,9 +43,12 @@ class RelationLossComputation(object):
         if self.use_label_smoothing:
             self.criterion_loss = Label_Smoothing_Regression(e=0.01)
         else:
-            # Focal Loss: down-weight easy examples, focus on hard ones
-            # gamma=2.0 is the standard setting from Lin et al. (ICCV 2017)
-            self.criterion_loss = MultiFocalLoss(gamma=2.0)
+            self.criterion_loss = nn.CrossEntropyLoss()
+        
+        ##### Focal Loss for relation classification
+        self.focal_gamma = 2.0  # focusing parameter
+        self.use_focal_loss = True  # enable focal loss for relation prediction
+        #####
 
 
     def __call__(self, proposals, rel_labels, relation_logits, refine_logits):
@@ -108,7 +80,15 @@ class RelationLossComputation(object):
         fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
         rel_labels = cat(rel_labels, dim=0)
 
-        loss_relation = self.criterion_loss(relation_logits, rel_labels.long())
+        ##### Focal Loss for relation classification
+        if self.use_focal_loss:
+            ce_loss = F.cross_entropy(relation_logits, rel_labels.long(), reduction='none')
+            pt = torch.exp(-ce_loss)  # pt = softmax probability of correct class
+            focal_weight = (1.0 - pt) ** self.focal_gamma
+            loss_relation = (focal_weight * ce_loss).mean()
+        else:
+            loss_relation = self.criterion_loss(relation_logits, rel_labels.long())
+        #####
         loss_refine_obj = self.criterion_loss(refine_obj_logits, fg_labels.long())
 
         # The following code is used to calcaulate sampled attribute loss
