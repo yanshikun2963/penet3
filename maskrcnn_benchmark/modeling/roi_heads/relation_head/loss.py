@@ -11,6 +11,37 @@ from maskrcnn_benchmark.modeling.matcher import Matcher
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.modeling.utils import cat
 
+class MultiFocalLoss(nn.Module):
+    """Multi-class Focal Loss for hard example mining in relation classification.
+    
+    Focal Loss reduces the contribution of easy examples and focuses training
+    on hard, misclassified examples. This is particularly beneficial for SGG
+    where head predicates (e.g., 'on', 'has') dominate and are easily classified.
+    
+    Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
+    """
+    def __init__(self, gamma=2.0, reduction='mean'):
+        super(MultiFocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        log_probs = F.log_softmax(input, dim=1)
+        probs = log_probs.exp()
+        # gather the log-probability of the ground-truth class
+        target = target.long()
+        log_pt = log_probs.gather(1, target.unsqueeze(1)).squeeze(1)
+        pt = log_pt.exp()
+        # focal weight: (1 - p_t)^gamma
+        focal_weight = (1.0 - pt) ** self.gamma
+        loss = -focal_weight * log_pt
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
 class RelationLossComputation(object):
     """
     Computes the loss for relation triplet.
@@ -43,7 +74,9 @@ class RelationLossComputation(object):
         if self.use_label_smoothing:
             self.criterion_loss = Label_Smoothing_Regression(e=0.01)
         else:
-            self.criterion_loss = nn.CrossEntropyLoss()
+            # Focal Loss: down-weight easy examples, focus on hard ones
+            # gamma=2.0 is the standard setting from Lin et al. (ICCV 2017)
+            self.criterion_loss = MultiFocalLoss(gamma=2.0)
 
 
     def __call__(self, proposals, rel_labels, relation_logits, refine_logits):
