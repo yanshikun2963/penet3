@@ -104,21 +104,10 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        ##### Post-hoc Logit Adjustment (inference-time only)
-        # Adjusts decision boundary at test time to favor rare predicates
-        pred_freq = torch.FloatTensor([
-            0.5, 68507, 8768, 3839, 2338, 944, 4278, 280, 213, 2978, 
-            996, 817, 266, 244, 152, 724, 218, 1001, 413, 9171, 
-            2097, 23147, 21584, 1415, 717, 194, 307, 224, 116, 6555,
-            2172, 48961, 5765, 3219, 2082, 1010, 269, 188, 258, 365,
-            195, 2413, 2236, 1009, 266, 293, 183, 149, 2000, 7917, 1049
-        ])
-        pred_freq = pred_freq.clamp(min=1.0)
-        log_prior = torch.log(pred_freq / pred_freq.sum())
-        self.register_buffer('log_freq_prior', log_prior)
-        self.logit_adj_tau = 1.0  # adjustment strength
+        ##### Component 2: DPL Variance-Normalized Inference
+        self.proto_sigma = nn.Parameter(torch.ones(self.num_rel_cls))
+        self.sigma_reg_weight = 0.01
         #####
-
 
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
@@ -216,10 +205,10 @@ class PrototypeEmbeddingNetwork(nn.Module):
         predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
-        rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
-        # Post-hoc logit adjustment: subtract frequency bias at inference
-        if not self.training:
-            rel_dists = rel_dists - self.logit_adj_tau * self.log_freq_prior.unsqueeze(0)
+        rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()
+        # DPL: Normalize by per-class sigma
+        sigma_pos = torch.abs(self.proto_sigma) + 1e-6
+        rel_dists = rel_dists / sigma_pos.unsqueeze(0)
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
@@ -260,6 +249,12 @@ class PrototypeEmbeddingNetwork(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
+
+ 
+            # DPL: Sigma regularization
+            sigma_pos = torch.abs(self.proto_sigma) + 1e-6
+            sigma_reg = self.sigma_reg_weight * sigma_pos.log().pow(2).mean()
+            add_losses.update({"sigma_reg": sigma_reg})
  
         return entity_dists, rel_dists, add_losses, add_data
 
