@@ -105,8 +105,10 @@ class PrototypeEmbeddingNetwork(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         ##### Component 2: DPL Variance-Normalized Inference
-        self.proto_sigma = nn.Parameter(torch.ones(self.num_rel_cls))
-        self.sigma_reg_weight = 0.01
+        # Per-class variance parameter sigma_k for normalizing cosine similarity
+        # Head classes (high variance) get suppressed; tail classes (low variance) get boosted
+        self.proto_log_sigma = nn.Parameter(torch.zeros(self.num_rel_cls))  # log-space for stability
+        self.sigma_reg_weight = 0.01  # regularization to prevent sigma collapse
         #####
 
         ##### refine object labels
@@ -205,10 +207,12 @@ class PrototypeEmbeddingNetwork(nn.Module):
         predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
+        ### Component 2: DPL - variance-normalized inference
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()
-        # DPL: Normalize by per-class sigma
-        sigma_pos = torch.abs(self.proto_sigma) + 1e-6
-        rel_dists = rel_dists / sigma_pos.unsqueeze(0)
+        # Normalize by per-class sigma (exp of log_sigma for positive guarantee)
+        sigma = torch.exp(self.proto_log_sigma).unsqueeze(0)  # (1, 51)
+        rel_dists = rel_dists / sigma
+        ###
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
@@ -251,10 +255,13 @@ class PrototypeEmbeddingNetwork(nn.Module):
             ### end 
 
  
-            # DPL: Sigma regularization
-            sigma_pos = torch.abs(self.proto_sigma) + 1e-6
-            sigma_reg = self.sigma_reg_weight * sigma_pos.log().pow(2).mean()
+
+            ### Component 2: DPL sigma regularization (prevent collapse to zero)
+            sigma = torch.exp(self.proto_log_sigma)
+            sigma_reg = self.sigma_reg_weight * (self.proto_log_sigma ** 2).mean()
             add_losses.update({"sigma_reg": sigma_reg})
+            ###
+
  
         return entity_dists, rel_dists, add_losses, add_data
 
