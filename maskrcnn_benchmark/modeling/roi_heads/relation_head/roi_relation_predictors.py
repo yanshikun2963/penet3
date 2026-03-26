@@ -104,6 +104,22 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        ##### Post-hoc Logit Adjustment (inference-time only)
+        # Adjusts decision boundary at test time to favor rare predicates
+        pred_freq = torch.FloatTensor([
+            0.5, 68507, 8768, 3839, 2338, 944, 4278, 280, 213, 2978, 
+            996, 817, 266, 244, 152, 724, 218, 1001, 413, 9171, 
+            2097, 23147, 21584, 1415, 717, 194, 307, 224, 116, 6555,
+            2172, 48961, 5765, 3219, 2082, 1010, 269, 188, 258, 365,
+            195, 2413, 2236, 1009, 266, 293, 183, 149, 2000, 7917, 1049
+        ])
+        pred_freq = pred_freq.clamp(min=1.0)
+        log_prior = torch.log(pred_freq / pred_freq.sum())
+        self.register_buffer('log_freq_prior', log_prior)
+        self.logit_adj_tau = 1.0  # adjustment strength
+        #####
+
+
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
             nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
@@ -201,6 +217,9 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
+        # Post-hoc logit adjustment: subtract frequency bias at inference
+        if not self.training:
+            rel_dists = rel_dists - self.logit_adj_tau * self.log_freq_prior.unsqueeze(0)
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
